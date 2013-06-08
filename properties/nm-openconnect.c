@@ -32,6 +32,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <glib.h>
 #include <glib/gi18n-lib.h>
 #include <string.h>
 #include <gtk/gtk.h>
@@ -81,6 +82,12 @@ G_DEFINE_TYPE_EXTENDED (OpenconnectPluginUiWidget, openconnect_plugin_ui_widget,
 						G_IMPLEMENT_INTERFACE (NM_TYPE_VPN_PLUGIN_UI_WIDGET_INTERFACE,
 											   openconnect_plugin_ui_widget_interface_init))
 
+struct token_mode_entry {
+	const char *pref_value;
+	const char *label;
+	gboolean token_secret_editable;
+};
+
 #define OPENCONNECT_PLUGIN_UI_WIDGET_GET_PRIVATE(o) (G_TYPE_INSTANCE_GET_PRIVATE ((o), OPENCONNECT_TYPE_PLUGIN_UI_WIDGET, OpenconnectPluginUiWidgetPrivate))
 
 typedef struct {
@@ -89,6 +96,7 @@ typedef struct {
 	GtkSizeGroup *group;
 	GtkWindowGroup *window_group;
 	gboolean window_added;
+	GArray *token_mode_list;
 } OpenconnectPluginUiWidgetPrivate;
 
 #define COL_AUTH_NAME 0
@@ -374,6 +382,20 @@ stuff_changed_cb (GtkWidget *widget, gpointer user_data)
 	g_signal_emit_by_name (OPENCONNECT_PLUGIN_UI_WIDGET (user_data), "changed");
 }
 
+static void
+append_token_list_option (OpenconnectPluginUiWidgetPrivate *priv,
+				const char *pref_value,
+				const char *label,
+				gboolean token_secret_editable)
+{
+	struct token_mode_entry e = {
+		.pref_value		= pref_value,
+		.label			= label,
+		.token_secret_editable	= token_secret_editable,
+	};
+	g_array_append_val (priv->token_mode_list, e);
+}
+
 static gboolean
 init_token_ui (OpenconnectPluginUiWidget *self,
 				OpenconnectPluginUiWidgetPrivate *priv,
@@ -381,13 +403,22 @@ init_token_ui (OpenconnectPluginUiWidget *self,
 {
 	GtkWidget *widget;
 	GtkTextBuffer *buffer;
+	GtkListStore *token_mode_list_store;
 	const char *value;
+	int i, active_option;
 
-	/*
-	 * don't advertise software token properties if we can't use them anyway
-	 * TODO: Fix up the dialog accordingly if e.g. stoken is present but oath is missing
-	 */
-	if (!openconnect_has_stoken_support () && !openconnect_has_oath_support ())
+	priv->token_mode_list = g_array_new (FALSE, FALSE, sizeof (struct token_mode_entry));
+
+	append_token_list_option (priv, "disabled", _("Disabled"), FALSE);
+	if (openconnect_has_stoken_support ()) {
+		append_token_list_option (priv, "stokenrc", _("RSA SecurID - read from ~/.stokenrc"), FALSE);
+		append_token_list_option (priv, "manual", _("RSA SecurID - manually entered"), TRUE);
+	}
+	if (openconnect_has_oath_support ())
+		append_token_list_option (priv, "totp", _("TOTP - manually entered"), TRUE);
+
+	/* if "Disabled" is the only option, don't bother rendering the rest of the dialog */
+	if (priv->token_mode_list->len == 1)
 		return TRUE;
 
 	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "token_vbox"));
@@ -398,19 +429,24 @@ init_token_ui (OpenconnectPluginUiWidget *self,
 	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "token_mode"));
 	if (!widget)
 		return FALSE;
-	if (s_vpn) {
-		value = nm_setting_vpn_get_data_item (s_vpn, NM_OPENCONNECT_KEY_TOKEN_MODE);
-		if (value) {
-			if (!strcmp (value, "stokenrc"))
-				gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 1);
-			else if (!strcmp (value, "manual"))
-				gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 2);
-			else if (!strcmp (value, "totp"))
-				gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 3);
-			else
-				gtk_combo_box_set_active (GTK_COMBO_BOX (widget), 0);
-		}
+
+	token_mode_list_store = gtk_list_store_new (1, G_TYPE_STRING);
+	value = s_vpn ? nm_setting_vpn_get_data_item (s_vpn, NM_OPENCONNECT_KEY_TOKEN_MODE) : NULL;
+
+	for (i = 0, active_option = 0; i < priv->token_mode_list->len; i++) {
+		struct token_mode_entry *e =
+			&g_array_index (priv->token_mode_list, struct token_mode_entry, i);
+		GtkTreeIter iter;
+
+		gtk_list_store_append (token_mode_list_store, &iter);
+		gtk_list_store_set (token_mode_list_store, &iter, 0, e->label, -1);
+
+		if (value && !strcmp (value, e->pref_value))
+			active_option = i;
 	}
+	gtk_combo_box_set_model (GTK_COMBO_BOX (widget), GTK_TREE_MODEL (token_mode_list_store));
+	gtk_combo_box_set_active (GTK_COMBO_BOX (widget), active_option);
+
 	g_signal_connect (G_OBJECT (widget), "changed", G_CALLBACK (stuff_changed_cb), self);
 
 	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "token_secret"));
@@ -554,25 +590,13 @@ update_connection (NMVpnPluginUiWidgetInterface *iface,
 
 	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "token_mode"));
 	idx = gtk_combo_box_get_active (GTK_COMBO_BOX (widget));
-	str = NULL;
-	switch (idx) {
-	case 0:
-		str = "disabled";
-		break;
-	case 1:
-		str = "stokenrc";
-		break;
-	case 2:
-		str = "manual";
-		token_secret_editable = TRUE;
-		break;
-	case 3:
-		str = "totp";
-		token_secret_editable = TRUE;
-		break;
+
+	if (idx < priv->token_mode_list->len) {
+		struct token_mode_entry *e =
+			&g_array_index (priv->token_mode_list, struct token_mode_entry, idx);
+		nm_setting_vpn_add_data_item (s_vpn, NM_OPENCONNECT_KEY_TOKEN_MODE, e->pref_value);
+		token_secret_editable = e->token_secret_editable;
 	}
-	if (str)
-		nm_setting_vpn_add_data_item (s_vpn, NM_OPENCONNECT_KEY_TOKEN_MODE, str);
 
 	widget = GTK_WIDGET (gtk_builder_get_object (priv->builder, "token_secret_label"));
 	gtk_widget_set_sensitive (widget, token_secret_editable);
@@ -701,6 +725,9 @@ dispose (GObject *object)
 
 	if (priv->builder)
 		g_object_unref (priv->builder);
+
+	if (priv->token_mode_list)
+		g_array_free (priv->token_mode_list, TRUE);
 
 	G_OBJECT_CLASS (openconnect_plugin_ui_widget_parent_class)->dispose (object);
 }

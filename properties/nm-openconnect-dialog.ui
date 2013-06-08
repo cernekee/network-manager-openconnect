@@ -614,7 +614,6 @@
                     <child>
                       <object class="GtkComboBox" id="token_mode">
                         <property name="visible">True</property>
-                        <property name="model">token_mode_list</property>
                         <property name="active">0</property>
                         <child>
                           <object class="GtkCellRendererText" id="renderer"/>
@@ -729,25 +728,5 @@
             <property name="fill">False</property>
           </packing>
         </child>
-      </object>
-      <object class="GtkListStore" id="token_mode_list">
-        <columns>
-          <!-- column-name legible -->
-          <column type="gchararray"/>
-        </columns>
-        <data>
-          <row>
-            <col id="0" translatable="yes">Disabled</col>
-          </row>
-          <row>
-            <col id="0" translatable="yes">RSA SecurID - read from ~/.stokenrc</col>
-          </row>
-          <row>
-            <col id="0" translatable="yes">RSA SecurID - manually entered</col>
-          </row>
-          <row>
-            <col id="0" translatable="yes">TOTP - manually entered</col>
-          </row>
-        </data>
       </object>
 </interface>
